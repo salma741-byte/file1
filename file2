@@ -1,0 +1,338 @@
+#include "miniShell.h"
+
+int	status = 0;
+
+// Tableau des commandes internes avec leurs gestionnaires
+t_builtin	g_builtin[] = 
+{
+	{.builtin_name = "echo", .foo=cmd_echo},  
+	{.builtin_name = "env", .foo=cmd_env},    
+	{.builtin_name = "exit", .foo=cmd_exit},  
+	{.builtin_name = NULL},                   
+};
+
+void	ms_launch(char **args){
+	if(Fork() == 0)
+		Execvp(args[0], args);
+	else
+		Wait(&status);
+}
+
+void	ms_execute(char **args)
+{
+	int i;
+	const char *curr_builtin;
+
+	if (!args || !args[0])
+		return;
+	i = 0;
+
+	while((curr_builtin = g_builtin[i].builtin_name)){
+		if(!strcmp(args[0], curr_builtin)){
+		    status = (g_builtin[i].foo)(args);
+		    return;
+		}
+		i++;
+	}
+
+	ms_launch(args);
+}
+
+char *get_username() {
+	struct passwd *pw = getpwuid(getuid());
+	return pw ? pw->pw_name : "unknown";
+}
+
+int is_root() {
+	return getuid() == 0;
+}
+
+char *ms_read_line() {
+	char *line = NULL;
+	size_t bufsize = 0;
+	char cwd[BUFSIZ];
+
+	if (!getcwd(cwd, sizeof(cwd)))
+		strcpy(cwd, "?");
+
+	char *user = get_username();
+
+	if (is_root()) {
+		printf(RED "[%s" NC "👿" BLUE "%s" RED "] ># " NC, user, cwd);
+	} else {
+		printf(GREEN "[%s" NC "😃" CYAN "%s" GREEN "] >$ " NC, user, cwd);
+	}
+
+	if (getline(&line, &bufsize, stdin) == -1) {
+		perror("Erreur de lecture");
+		free(line);
+		return NULL;
+	}
+
+	return line;
+}
+
+char	**ms_split_line(char *line)
+{
+	size_t bufsize;
+	unsigned long position;
+	char **tokens;
+
+	bufsize = BUFSIZ;
+	position = 0;
+	tokens = Malloc(bufsize * sizeof *tokens);
+	char *token;
+
+	for(token = strtok(line, DL); token; token = strtok(NULL, DL)){
+		tokens[position++] = token;	
+		if(position >= bufsize){
+			bufsize *= 2;
+			tokens = Realloc(tokens, bufsize * sizeof *tokens);
+		}
+	}
+	tokens[position] = NULL;
+	return tokens;
+}
+
+int main(){
+	printbanner();
+
+	char	*line;
+	char	**args;
+
+	while((line = ms_read_line())){
+
+		args = ms_split_line(line);	
+		int i;
+		if (args[0] && !strcmp(args[0], "cd")){
+			if(args[1])
+				 i = Chdir(args[1]);
+			else
+				chdir(getenv("HOME"));
+		}
+		else
+			ms_execute(args);
+
+		free(line);
+		free(args);
+	}
+
+	return 0;
+}
+#ifndef MS_H
+# define MS_H
+
+#include <pwd.h>     // pour struct passwd et getpwuid
+#include <unistd.h>  // pour getuid
+# include <stdbool.h>
+# include <stdlib.h>
+# include <stdio.h>
+# include <errno.h>
+# include <string.h>
+# include <sys/wait.h>
+# include <sysexits.h>
+
+// Codes de couleurs ANSI utilisés pour formater le texte dans le terminal
+#define RED     "\033[1;31m"
+#define GREEN   "\033[1;32m"
+#define YELLOW  "\033[1;33m"
+#define BLUE    "\033[1;34m"
+#define CYAN    "\033[1;36m"
+#define NC      "\033[0m"
+
+#define ERROR(msg) fprintf(stderr, RED msg NC "\n")
+#define DL	"\t\n\v\f\r "
+
+// Le statut du code pour les opérations shell
+enum {
+	OK,     /* Operation succeeded */
+	ERROR   /* Operation failed */
+};
+
+/**
+ * Structure représentant une commande interne (built-in).
+ * @builtin_name Nom de la commande intégrée (ex: "cd", "exit", etc.)
+ * @foo          Pointeur vers la fonction qui implémente la commande
+ */
+typedef struct s_builtin {
+	const char *builtin_name;
+	int (*foo)(char **av);
+} t_builtin;
+
+/*
+** Built-in command function prototypes
+** Each returns 0 on success, non-zero on failure
+*/
+int	cmd_echo(char **args);  /* Echo command implementation */
+int	cmd_env(char **args);   /* Environment variables display */
+int	cmd_exit(char **args);  /* Shell exit command */
+
+// Animation et banner
+void 	exitLoading();  
+void	printbanner();  
+
+/*
+** Wrappers pour les appels système avec gestion des erreurs
+** Chaque wrapper vérifie les erreurs et les traite de manière appropriée
+*/
+int	Chdir(const char *path);     
+pid_t	Fork(void);                 
+void	Execvp(const char *file, char *const argv[]); 
+pid_t	Wait(int *status);
+pid_t	Waitpid(pid_t pid, int *status, int options); 
+void	*Malloc(size_t size);         
+void	*Realloc(void *ptr, size_t size);
+char	*Getcwd(char *buf, size_t size); 
+void	Getline(char **lineptr, size_t *n, FILE *stream);
+
+#endif
+#include "ms.h"
+
+/**
+ * Chdir - Change le répertoire de travail courant avec gestion des erreurs
+ */
+int Chdir(const char *path){
+	if (!path) {
+		fprintf(stderr, RED"cd: path argument required\n"NC);
+		return -1;
+	}
+	if (chdir(path) == -1)
+		perror(RED"cd failed"NC);
+	return 0;
+}
+
+/**
+ * Fork - Crée un nouveau processus avec gestion des erreurs
+ */
+pid_t Fork(void) {
+	pid_t pid = fork();
+	if (pid < 0) {
+		perror(RED"Fork failed"NC);
+		exit(-1);
+	}
+	return pid;
+}
+
+/**
+ * Execvp - Exécute un programme avec gestion des erreurs
+ */
+void Execvp(const char *file, char *const argv[]) {
+	if (!file || !argv) {
+		fprintf(stderr, RED"Execvp: invalid arguments\n"RED);
+		exit(EXIT_FAILURE);
+	}
+	if (execvp(file, argv) == -1) {
+		perror(RED"failed"RED);
+		exit(EX_UNAVAILABLE);
+	}
+}
+
+/**
+ * Wait - Attend la fin de n'importe quel processus fils avec gestion des erreurs
+ */
+pid_t Wait(int *status) {
+	if (!status) {
+		fprintf(stderr, RED"Wait: status argument required\n"NC);
+		return -1;
+	}
+	pid_t result = wait(status);
+	if (result == -1)
+		perror(RED"Wait failed"NC);
+	if (WIFEXITED(*status))
+		*status = WEXITSTATUS(*status);
+	return result;
+}
+
+/**
+ * Malloc - Allocation de mémoire avec gestion des erreurs
+ */
+void *Malloc(size_t size) {
+	if (size == 0)
+		return NULL;
+	void *ptr = malloc(size);
+	if (!ptr) {
+		perror(RED"Malloc failed"NC);
+		exit(EXIT_FAILURE);
+	}
+	return ptr;
+}
+
+/**
+ * Realloc - Reallocation avec gestion des erreurs
+ */
+void *Realloc(void *ptr, size_t size) {
+	void *new_ptr = realloc(ptr, size);
+	if (!new_ptr && size != 0) {
+		perror(RED"Realloc failed"NC);
+		exit(EXIT_FAILURE);
+	}
+	return new_ptr;
+}
+
+/**
+ * Getcwd - Obtient le répertoire courant avec gestion d'erreur
+ */
+char *Getcwd(char *buf, size_t size) {
+	char *result = getcwd(buf, size);
+	if (!result)
+		perror(RED"Getcwd failed"NC);
+	return result;
+}
+
+/**
+ * Getline - Lit une ligne avec gestion d'erreur
+ */
+void Getline(char **lineptr, size_t *n, FILE *stream) {
+	if (!lineptr || !stream) {
+		fprintf(stderr, RED"Getline: invalid arguments\n"NC);
+		return;
+	}
+	if (getline(lineptr, n, stream) == -1) {
+		free(*lineptr);
+		*lineptr = NULL;
+		if (feof(stream))
+			printf(RED"[EOF]"NC"\n");
+		else
+			perror(RED"Getline failed"NC);
+	}
+}
+
+/**
+ * exitLoading - Animation lors de la sortie
+ */
+void exitLoading() {
+	const char *circle_frames[] = { "◐", "◓", "◑", "◒" };
+	const int frames_count = sizeof(circle_frames) / sizeof(circle_frames[0]);
+
+	printf(RED "Arrêt en cours " NC);
+	for (int i = 0; i < 40; i++) {
+		printf("\r" RED "Arrêt en cours %s" NC, circle_frames[i % frames_count]);
+		fflush(stdout);
+		usleep(100000); // 100 ms
+	}
+	printf("\r" CYAN "✅ Arrêt terminé !     \n" NC);
+	exit(EX_OK);
+}
+
+/**
+ * printbanner - Affiche une bannière au lancement du shell
+ */
+void printbanner() {
+	printf(GREEN);
+	printf("     ███████╗███████╗██╗     ███╗   ███╗ █████╗     ███████╗██╗  ██╗███████╗██╗     ██╗     \n");
+	printf("     ██╔════╝██╔════╝██║     ████╗ ████║██╔══██╗    ██╔════╝██║  ██║██╔════╝██║     ██║     \n");
+	printf("     ███████╗█████╗  ██║     ██╔████╔██║███████║    ███████╗███████║█████╗  ██║     ██║     \n");
+	printf("     ╚════██║██╔══╝  ██║     ██║╚██╔╝██║██╔══██║    ╚════██║██╔══██║██╔══╝  ██║     ██║     \n");
+	printf("     ███████║███████╗███████╗██║ ╚═╝ ██║██║  ██║    ███████║██║  ██║███████╗███████╗███████╗\n");
+	printf("     ╚══════╝╚══════╝╚══════╝╚═╝     ╚═╝╚═╝  ╚═╝    ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝╚══════╝\n");
+
+	printf("%s", CYAN);
+	printf("          ========================================\n");
+	printf("%s            🛠️  BIENVENUE DANS SELMA SHELL        \n", BLUE);
+	printf("%s          ========================================\n", CYAN);
+	printf("%s           Réalisé par     : salma farid\n", YELLOW);
+	printf("           Version         : 1.0\n");
+	printf("           Date            : 28 mai 2025\n");
+	printf("%s          ========================================%s\n", CYAN, NC);
+}
+
